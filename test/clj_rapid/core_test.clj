@@ -25,10 +25,11 @@
 
 (defapi ^{:get "/items"} search-item
   "Search todo items"
-  [^{:query string?} text
-   ^{:query {:default 10 :valid [int? "Should be an integer"]}} limit
-   ^{:query {:default 0 :valid [int? "Should be an integer"]}} offset]
-  {:count 1
+  [^{:query String} text
+   ^{:query :int :default 10 :valid [int? "Should be an integer"]} limit
+   ^{:query :int :default 0 :valid [int? "Should be an integer"]} offset]
+  {:count limit
+   :offset offset
    :items [{:todo "Buy milk"}]})
 
 (defapi ^{:get "/find-items"} find-items
@@ -53,4 +54,15 @@
 (deftest request-handling
   (testing "handling requests"
     (let [req-handler (handler this-ns)]
-      (is (str/starts-with? (req-handler {:request-method :get :uri "/ping"}) "Hello at")))))
+      (is (str/starts-with? (req-handler {:request-method :get :uri "/ping"}) "Hello at"))
+      (is (= "Hello:there" (req-handler {:request-method :get :uri "/hello/there"})))
+      (is (like? {:id 1 :title "the title"}
+                 (req-handler {:request-method :post :uri "/item" :body {:title "the title"}})))
+      (is (thrown? Exception
+                   (req-handler {:request-method :post :uri "/item" :body {:name "the title"}})))
+      (is (like? {:count 20
+                  :offset 10
+                  :items [{:todo "Buy milk"}]}
+                 (req-handler {:request-method :get
+                               :uri "/items"
+                               :query-params {:text "shopping" :limit "20" :offset "10"}}))))))

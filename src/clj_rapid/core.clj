@@ -5,17 +5,26 @@
 
 (def http-methods #{:get :put :post :patch :delete :options :*})
 
-(def ANY-PATH :* )
+(def param-sources [:body :header :query :form :form* :query* :path])
 
-(defmulti from-str (fn [type value] type))
+(def ANY-PATH :*)
 
-(defmethod from-str Long [_ v] (Long/parseLong v))
+(defmulti conform-to (fn [type value]
+                       (cond
+                         (or (s/spec? type) (and (keyword? type) (s/get-spec type))) ::spec
+                         :else type)))
 
-(defmethod from-str Boolean [_ v] (Boolean/parseBoolean v))
+(defmethod conform-to ::spec [s v] (specs/conform! s v))
 
-(defmethod from-str int [_ v] (Integer/parseInt v))
+(defmethod conform-to String [_ v] v)
 
-(defmethod from-str :decimal [_ v] (BigDecimal. v))
+(defmethod conform-to Long [_ v] (Long/parseLong v))
+
+(defmethod conform-to Boolean [_ v] (Boolean/parseBoolean v))
+
+(defmethod conform-to :int [_ v] (Integer/parseInt v))
+
+(defmethod conform-to :decimal [_ v] (BigDecimal. v))
 
 (defmacro unless [p v exp]
   `(if (~p ~v) ~v ~exp))
@@ -33,7 +42,6 @@
 ;;     (vary-meta a )))
 
 
-
 (defn- path-var? [path]
   (str/starts-with? path ":"))
 
@@ -46,7 +54,7 @@
         path-parts (mapv #(if (path-var? %) ANY-PATH %) path-parts)]
     {:verb verb
      :path path-parts
-     :vars path-vars}))
+     :path-vars (mapv keyword path-vars)}))
 
 (defmacro defapi
   "Defines a Ring handler function.
@@ -77,6 +85,7 @@
         _ (when-not (vector? (first fdecl))
             (throw (IllegalArgumentException. "Expected argument vector")))
         [argv & body] fdecl
+        argv (mapv #(vary-meta % eval) argv)
         route# (route (name fname) m)]
     `(defn ~(with-meta fname
               (assoc m :api-fn? true
@@ -86,24 +95,30 @@
 
 (defn- arg-parser [arg path-vars]
   (let [arg-meta (as-> (meta arg) arg-meta
-                   (unless :type arg-meta (assoc arg-meta :type (:tag arg-meta)))
                    (unless :name arg-meta (assoc arg-meta :name (name arg)))
                    (unless :source arg-meta
-                           (assoc arg-meta
-                                  :source (if (some #(= (:name arg-meta) %) path-vars) :path :query))))
-        convert-fn (or (some->> (:type arg-meta) (partial from-str)) identity)
+                           (if-let [[source type] (first (select-keys arg-meta param-sources))]
+                             (assoc arg-meta :source source :type type)
+                             (assoc arg-meta
+                                    :source (if (some #(= (:name arg-meta) (name %)) path-vars)
+                                              :path :query))))
+                   (unless :type arg-meta (assoc arg-meta :type (:tag arg-meta))))
+        convert-fn (or (some->> (:type arg-meta) (partial conform-to)) identity)
         value-fn (case (:source arg-meta)
                    :body :body
-                   :query (comp convert-fn (keyword (:name arg-meta)) :query-params)
-                   :form (comp convert-fn (keyword (:name arg-meta)) :form-params)
-                   :path (comp convert-fn (keyword (:name arg-meta)) :path-params)
-                   :header #(convert-fn (get-in % [:headers (:name arg-meta)]))
+                   :query (comp (keyword (:name arg-meta)) :query-params)
+                   :form (comp (keyword (:name arg-meta)) :form-params)
+                   :path (comp (keyword (:name arg-meta)) :path-params)
+                   :header #(get-in % [:headers (:name arg-meta)])
                    :query* :query-params
                    :form* :form-params)
-        [valid msg] (or (:valid arg-meta) [identity])]
-    (cond
-      (fn? valid) (comp valid value-fn)
-      (or (s/spec? valid) (s/get-spec valid)) (comp (partial specs/conform! valid) value-fn))))
+        valid-fn (when-let [[valid msg] (:valid arg-meta)]
+                   (fn [v]
+                     (when-not (valid v)
+                       (throw (ex-info (or msg "invalid value:" v)
+                                       {:value v :arg (:name arg-meta)})))
+                     v))]
+    (comp (or valid-fn identity) convert-fn value-fn)))
 
 (defn- fn->handler [f]
   (let [m (meta f)
