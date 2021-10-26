@@ -8,7 +8,14 @@
 
 (s/def ::title string?)
 
-(s/def ::item (s/keys :req-un [::title] ))
+(s/def ::item (s/keys :req-un [::title]))
+
+(defn wrap-user [handler]
+  (fn [req]
+    (if-let [user-id (-> req :session :user-id)]
+      (let [user {:id user-id}]
+        (handler (assoc req :user user)))
+      (handler req))))
 
 (defapi ping []
   (str "Hello at " (Date.)))
@@ -23,14 +30,16 @@
   [^{:body ::item} item]
   (assoc item :created (Date.) :id 1))
 
-(defapi ^{:get "/items"} search-item
-  "Search todo items"
-  [^{:query String} text
+(defapi ^{:get "/items" :wrappers [wrap-user]} search-item
+  "Search TODO items"
+  [^:request user
+   ^{:query String} text
    ^{:query :int :default 10 :valid [int? "Should be an integer"]} limit
    ^{:query :int :default 0 :valid [int? "Should be an integer"]} offset]
   {:count limit
    :offset offset
-   :items [{:todo "Buy milk"}]})
+   :items [{:todo "Buy milk"}]
+   :user user})
 
 (defapi ^{:get "/find-items"} find-items
   "Find items using a query"
@@ -54,15 +63,17 @@
 (deftest request-handling
   (testing "handling requests"
     (let [req-handler (handler this-ns)]
-      (is (str/starts-with? (req-handler {:request-method :get :uri "/ping"}) "Hello at"))
-      (is (= "Hello:there" (req-handler {:request-method :get :uri "/hello/there"})))
-      (is (like? {:id 1 :title "the title"}
+      (is (like? {:status 200 :body #(str/starts-with? % "Hello at")}
+                 (req-handler {:request-method :get :uri "/ping"})))
+      (is (= "Hello:there" (:body (req-handler {:request-method :get :uri "/hello/there"}))))
+      (is (like? {:body {:id 1 :title "the title"}}
                  (req-handler {:request-method :post :uri "/item" :body {:title "the title"}})))
-      (is (thrown? Exception
-                   (req-handler {:request-method :post :uri "/item" :body {:name "the title"}})))
-      (is (like? {:count 20
-                  :offset 10
-                  :items [{:todo "Buy milk"}]}
+      (is (like? {:status 400 :body {:message #(str/starts-with? % "Failed conforming")}}
+                 (req-handler {:request-method :post :uri "/item" :body {:name "the title"}})))
+      (is (like? {:status 200
+                  :body {:count 20
+                         :offset 10
+                         :items [{:todo "Buy milk"}]}}
                  (req-handler {:request-method :get
                                :uri "/items"
                                :query-params {:text "shopping" :limit "20" :offset "10"}}))))))
