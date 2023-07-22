@@ -4,7 +4,8 @@
   :license {:name "Eclipse Public License"
             :url  "http://www.eclipse.org/legal/epl-v10.html"}
   :dependencies [
-                 [ring/ring-core "1.9.4"]]
+                 [ring/ring-core "1.9.4"]
+                 [metosin/muuntaja "0.6.8"]]
   :plugins [[lein-cloverage "1.0.13"]
             [lein-shell "0.5.0"]
             [lein-ancient "0.6.15"]

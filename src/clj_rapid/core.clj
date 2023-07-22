@@ -3,7 +3,10 @@
    [clj-rapid.specs :as specs]
    [clojure.spec.alpha :as s]
    [clojure.string :as str]
-   [ring.util.response :as response]))
+   [ring.util.response :as response]
+   [ring.middleware.params :as params]
+   [ring.middleware.keyword-params :as keyword-params]
+   [muuntaja.middleware :as mm]))
 
 (def http-methods #{:get :put :post :patch :delete :options :*})
 
@@ -11,7 +14,7 @@
 
 (def ANY-PATH :*)
 
-(defmulti conform-to (fn [type value]
+(defmulti conform-to (fn [type _]
                        (cond
                          (or (s/spec? type) (and (keyword? type) (s/get-spec type))) ::spec
                          :else type)))
@@ -85,11 +88,13 @@
 (defn- wrap-error
   [f error-type arg-meta]
   (fn [x]
-    (try (f x)
-         (catch Exception e
-           (throw (ex-info (format "Failed conforming argument:%s to %s due to %s"
-                                   (:name arg-meta) (:type arg-meta) (.getMessage e))
-                           {:type error-type :arg (:name arg-meta) :cause e}))))))
+    (try
+      (f x)
+      (catch Exception e
+        (throw (ex-info (format "Failed conforming argument: %s to %s due to %s"
+                                (:name arg-meta) (:type arg-meta) (.getMessage e))
+                        {:type error-type :arg (:name arg-meta)}
+                        e))))))
 
 (defn- arg-parser [arg path-vars]
   (let [arg-meta (as-> (meta arg) arg-meta
@@ -106,8 +111,8 @@
         convert-fn (or (some->> (:type arg-meta) (partial conform-to)) identity)
         value-fn (case (:source arg-meta)
                    :body #(or (:body-params %) (:body %))
-                   :query (comp (keyword (:name arg-meta)) :query-params)
-                   :form (comp (keyword (:name arg-meta)) :form-params)
+                   :query #(get-in % [:query-params (:name arg-meta)])
+                   :form #(get-in % [:form-params (:name arg-meta)])
                    :path (comp (keyword (:name arg-meta)) :path-params)
                    :header #(get-in % [:headers (:name arg-meta)])
                    :query* :query-params
@@ -132,7 +137,7 @@
                   (apply juxt arg-parsers)
                   (constantly []))
         handler (fn [req]
-                  (println "apply f:" (argv-fn req))
+                  (println "apply f:" (argv-fn req) " req:" req)
                   (apply f (argv-fn req)))]
     [(:route m) (if-let [wrappers (:wrappers m)]
                   ((apply comp wrappers) handler)
@@ -169,25 +174,31 @@
 (defn- swagger-spec [ns format info]
   {:openapi "3.0.3"
    :info info
-   :servers {:url ""}}
-  )
+   :servers {:url ""}})
 
 (defn- wrap-response [f]
   (fn [req]
     (try
-      (response/response (f req))
+      (let [result (f req)]
+        (if (response/response? result)
+          result
+          (response/response result)))
       (catch Exception e
         (if (= :bad-input (:type (ex-data e)))
           (response/bad-request (assoc (ex-data e) :message (ex-message e)))
-          (response/status (ex-data e) 500))))))
+          (throw e))))))
 
 (defn handler
   "Generates a composite handler using the `defapi` definitions in the specified namespace.
   This handler can be used for serving requests"
   [ns]
-  (let [routes (routes-in ns)]
-    (fn [req]
-      (let [[route route-fn path-params] (match-request routes req)
-            req (assoc req :path-params (zipmap (:path-vars route) path-params))]
-        (when route-fn
-          ((wrap-response route-fn) req))))))
+  (let [routes (routes-in ns)
+        req-handler (fn [req]
+                      (let [[route route-fn path-params] (match-request routes req)
+                            req (assoc req :path-params (zipmap (:path-vars route) path-params))]
+                        (when route-fn
+                          (route-fn req))))]
+    (-> req-handler
+        params/wrap-params
+        wrap-response
+        mm/wrap-format)))

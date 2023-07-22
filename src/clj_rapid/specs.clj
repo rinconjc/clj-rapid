@@ -27,6 +27,6 @@
 (defn conform! [a-spec a-value]
   (let [result (s/conform a-spec a-value)]
     (when (s/invalid? result)
-      (throw (ex-info "value failed to conform to spec"
-                      (s/explain-data a-spec a-value))))
+      (throw (ex-info (format "value failed to conform to spec: %s"
+                              (s/explain-str a-spec a-value)) {})))
     result))
