@@ -3,14 +3,15 @@
    [clj-rapid.specs :as specs]
    [clojure.spec.alpha :as s]
    [clojure.string :as str]
-   [ring.util.response :as response]
-   [ring.middleware.params :as params]
+   [clojure.tools.logging :as log]
+   [muuntaja.middleware :as mm]
    [ring.middleware.keyword-params :as keyword-params]
-   [muuntaja.middleware :as mm]))
+   [ring.middleware.params :as params]
+   [ring.util.response :as response]))
 
 (def http-methods #{:get :put :post :patch :delete :options :*})
 
-(def param-sources [:body :header :query :form :form* :query* :path :request])
+(def param-sources [:body :header :query :form :form* :query* :path :request :param :param*])
 
 (def ANY-PATH :*)
 
@@ -31,59 +32,27 @@
 
 (defmethod conform-to :decimal [_ v] (when v (BigDecimal. v)))
 
+(defmethod conform-to :default
+  [type _]
+  (log/warnf "No type conformer defined for %s" type))
+
 (defmacro unless [p v exp]
   `(if (~p ~v) ~v ~exp))
 
 (defn- path-var? [path]
   (str/starts-with? path ":"))
 
-(defn- route [f-name f-meta]
-  (let [[verb path] (or (some #(some->> (f-meta %) (vector %)) http-methods)
-                        [:get (str "/" f-name)])
-        path-parts (filter (comp not empty?) (str/split path #"/"))
-        path-vars (->> (filterv path-var? path-parts)
-                       (mapv #(subs % 1)))
-        path-parts (mapv #(if (path-var? %) ANY-PATH %) path-parts)]
-    {:verb verb
-     :path path-parts
-     :path-vars (mapv keyword path-vars)}))
-
-(defmacro defapi
-  "Defines a Ring handler function.
-  Uses Clojure metadata to specify and describe the API endpoint.
-  The following keys are supported:
-  :get,:post,:put,:patch,:delete	The request path string including path variables. e.g /mypath/:somevar/more
-  :middleware A vector of Ring middleware
-
-  The arguments also support the following optional metadata formats:
-
-  - `^int arg`, basic format with only type annotation
-  - `^{:source :query :type int ...}`, explicit metadata supporting following keys:
-      * `:source` , the request source one of `:path`, `:query`, `:form`, `:header`, `:body`. Defaults to `:query`. Additionally, the special keys `:query*` and `:form*` are used to match all the query and form parameters.
-      * `:type` , the type annotation for simple values. Built-in type conversions exists for int, bool, LocalDate, LocalTime, LocalDateTime. Additional conversions can be defined implementing the protocol `FromString`
-      * `:name`, the name in the request `source`, applicable for `:path`, `:query`, `:form`, `:header`. It defaults to the arg name.
-      * `:valid`, a tuple of validation function or an spec and an optional message.
-      * `:default`, a default value
-      * `:doc`, documentation of the argument
-  "
-  {:arglists '([route? name docstring? [params*] body])}
-  [fname & fdecl]
-  (when-not (symbol? fname)
-    (throw (IllegalArgumentException. "First argument to defapi must be a symbol")))
-  (let [m (or (meta fname) {})
-        [m fdecl] (if (string? (first fdecl))
-                    [(assoc m :doc (first fdecl)) (rest fdecl)]
-                    [m fdecl])
-        _ (when-not (vector? (first fdecl))
-            (throw (IllegalArgumentException. "Expected argument vector")))
-        [argv & body] fdecl
-        argv (mapv #(vary-meta % eval) argv)
-        route# (route (name fname) m)]
-    `(defn ~(with-meta fname
-              (assoc m :api-fn? true
-                     :route route#))
-       ~argv
-       ~@body)))
+(defn- route [f-var]
+  (let [f-meta (meta f-var)]
+    (when-let [[method path] (some #(some->> (f-meta %) (vector %)) http-methods)]
+      (let [path (if (true? path) (str (:name f-meta)) path)
+            path-parts (filter (comp not empty?) (str/split path #"/"))
+            path-vars (->> (filterv path-var? path-parts)
+                           (mapv #(subs % 1)))
+            path-parts (mapv #(if (path-var? %) ANY-PATH %) path-parts)]
+        {:method method
+         :path path-parts
+         :path-vars (mapv keyword path-vars)}))))
 
 (defn- wrap-error
   [f error-type arg-meta]
@@ -91,6 +60,7 @@
     (try
       (f x)
       (catch Exception e
+        (log/warn "type coercion error for value" x "with function" f)
         (throw (ex-info (format "Failed conforming argument: %s to %s due to %s"
                                 (:name arg-meta) (:type arg-meta) (.getMessage e))
                         {:type error-type :arg (:name arg-meta)}
@@ -99,13 +69,14 @@
 (defn- arg-parser [arg path-vars]
   (let [arg-meta (as-> (meta arg) arg-meta
                    (unless :name arg-meta (assoc arg-meta :name (name arg)))
+                   (update arg-meta :name keyword)
                    (unless :source arg-meta
                            (if-let [[source type] (first (select-keys arg-meta param-sources))]
                              (if (true? type)
                                (assoc arg-meta :source source)
                                (assoc arg-meta :source source :type type))
                              (assoc arg-meta
-                                    :source (if (some #(= (:name arg-meta) (name %)) path-vars)
+                                    :source (if (some #(= (:name arg-meta) %) path-vars)
                                               :path :query))))
                    (unless :type arg-meta (assoc arg-meta :type (:tag arg-meta))))
         convert-fn (or (some->> (:type arg-meta) (partial conform-to)) identity)
@@ -113,43 +84,44 @@
                    :body #(or (:body-params %) (:body %))
                    :query #(get-in % [:query-params (:name arg-meta)])
                    :form #(get-in % [:form-params (:name arg-meta)])
-                   :path (comp (keyword (:name arg-meta)) :path-params)
+                   :param #(get-in % [:params (:name arg-meta)])
+                   :params :params
+                   :path (comp (:name arg-meta) :path-params)
                    :header #(get-in % [:headers (:name arg-meta)])
                    :query* :query-params
                    :form* :form-params
-                   :request (keyword (:name arg-meta)))
-        valid-fn (if-let [[valid msg] (:valid arg-meta)]
-                   (fn [v]
-                     (when-not (valid v)
-                       (throw (ex-info (or msg "invalid value:" v)
-                                       {:type :bad-input :value v :arg (:name arg-meta)})))
-                     v)
-                   identity)
+                   :request (:name arg-meta))
         default-fn (if-let [default (:default arg-meta)]
                      (fn [v] (if (nil? v) default v))
                      identity)]
-    (comp default-fn valid-fn (wrap-error convert-fn :bad-input arg-meta)  value-fn)))
+    (comp default-fn (wrap-error convert-fn :bad-input arg-meta) value-fn)))
 
-(defn- fn->handler [f]
-  (let [m (meta f)
-        arg-parsers (mapv #(arg-parser % (get-in m [:route :path-vars])) (first (:arglists m)))
-        argv-fn (if (seq arg-parsers)
-                  (apply juxt arg-parsers)
-                  (constantly []))
-        handler (fn [req]
-                  (println "apply f:" (argv-fn req) " req:" req)
-                  (apply f (argv-fn req)))]
-    [(:route m) (if-let [wrappers (:wrappers m)]
-                  ((apply comp wrappers) handler)
-                  handler)]))
+(defn- route-handler [f-var]
+  (when-let [r (route f-var)]
+    (let [m (meta f-var)
+          arg-parsers (mapv #(arg-parser % (:path-vars r)) (first (:arglists m)))
+          argv-fn (if (seq arg-parsers)
+                    (apply juxt arg-parsers)
+                    (constantly []))
+          handler (fn [req]
+                    (apply f-var (argv-fn req)))]
+      [r (if-let [wrappers (:wrappers m)]
+           ((apply comp wrappers) handler)
+           handler)])))
 
-(defn- routes [& fs]
-  (let [route-handlers (map fn->handler fs)]
-    (reduce (fn [result [route handler]]
-              (assoc-in result
-                        (cons (:verb route) (conj (:path route) :/))
-                        [route handler]))
-            {} route-handlers)))
+(defn- merge-routes [routes [route handler]]
+  (assoc-in routes
+            (cons (:method route) (conj (:path route) :/))
+            [route handler]))
+
+(defn- routes-from [fn-vars]
+  (reduce merge-routes {}
+          (->> fn-vars
+               (map route-handler)
+               (filter some?))))
+
+(defn- ns-routes [ns]
+  (routes-from (->> (ns-interns ns) (map second))))
 
 (defn- match-path [routes ks path-params]
   (when routes
@@ -166,11 +138,6 @@
                             (conj :/)))]
     (match-path routes path [])))
 
-(defn- routes-in [ns]
-  (apply routes (->> (ns-interns ns)
-                     (map second)
-                     (filter (comp :api-fn? meta)))))
-
 (defn- swagger-spec [ns format info]
   {:openapi "3.0.3"
    :info info
@@ -184,15 +151,18 @@
           result
           (response/response result)))
       (catch Exception e
+        (println e)
         (if (= :bad-input (:type (ex-data e)))
           (response/bad-request (assoc (ex-data e) :message (ex-message e)))
           (throw e))))))
 
 (defn handler
-  "Generates a composite handler using the `defapi` definitions in the specified namespace.
+  "Creates a handler using the definitions in the specified namespace.
   This handler can be used for serving requests"
-  [ns]
-  (let [routes (routes-in ns)
+  {:arglists '([path namespace]
+               [path [fns...]])}
+  [path ns-or-fns]
+  (let [routes (ns-routes ns-or-fns)
         req-handler (fn [req]
                       (let [[route route-fn path-params] (match-request routes req)
                             req (assoc req :path-params (zipmap (:path-vars route) path-params))]

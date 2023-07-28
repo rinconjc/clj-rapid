@@ -4,13 +4,11 @@
 (defn alike? [x y]
   (let [result* (cond
                   (map? x) (and (map? y)
-                                (let [alike* (->> x
-                                                  (map (fn [[k v]]
-                                                         (if (fn? v)
-                                                           (or (v (get y k)) [v (get y k)])
-                                                           (alike? v (get y k)))))
-                                                  (filter (comp not true?)))]
-                                  (or (empty? alike*) alike*)))
+                                (let [alike* (some (fn [[k v]]
+                                                     (let [r* (alike? v (get y k))]
+                                                       (when-not (true? r*)
+                                                         r*))) x)]
+                                  (or (nil? alike*) alike*)))
                   (coll? x) (and (coll? y) (or (and (empty? x) (empty? y))
                                                (let [alike* (map alike? x y)]
                                                  (or (every? true? alike*)
