@@ -5,7 +5,6 @@
    [clojure.string :as str]
    [clojure.tools.logging :as log]
    [muuntaja.middleware :as mm]
-   [ring.middleware.keyword-params :as keyword-params]
    [ring.middleware.params :as params]
    [ring.util.response :as response]))
 
@@ -132,8 +131,8 @@
             (conj path-params))))
 
 (defn- match-request [routes req]
-  (let [verb (:request-method req)
-        path (cons verb (-> req :uri (str/split #"/")
+  (let [method (:request-method req)
+        path (cons method (-> req :uri (str/split #"/")
                             ((partial filterv not-empty))
                             (conj :/)))]
     (match-path routes path [])))
@@ -156,19 +155,42 @@
           (response/bad-request (assoc (ex-data e) :message (ex-message e)))
           (throw e))))))
 
-(defn handler
-  "Creates a handler using the definitions in the specified namespace.
-  This handler can be used for serving requests"
-  {:arglists '([path namespace]
-               [path [fns...]])}
-  [path ns-or-fns]
-  (let [routes (ns-routes ns-or-fns)
-        req-handler (fn [req]
+(defn- handler-from [routes]
+  (let [req-handler (fn [req]
                       (let [[route route-fn path-params] (match-request routes req)
                             req (assoc req :path-params (zipmap (:path-vars route) path-params))]
-                        (when route-fn
-                          (route-fn req))))]
+                        (if route-fn
+                          (route-fn req)
+                          (response/not-found {}))))]
     (-> req-handler
         params/wrap-params
         wrap-response
         mm/wrap-format)))
+
+(defn- normalise-prefix [uri-prefix]
+  (as-> uri-prefix prefix
+    (if (str/ends-with? prefix "/") prefix (str prefix "/"))
+    (if (str/starts-with? prefix "/") prefix (str "/" prefix))))
+
+(defn- composite-handler [prefix-and-handlers]
+  (let [prefix-and-handlers (map #(vector (normalise-prefix (first %)) (second %)) prefix-and-handlers)]
+    (fn [{:keys [uri] :as req}]
+      (if-let [[prefix handler-fn] (some #(when (str/starts-with? uri (first %)) %) prefix-and-handlers)]
+        (handler-fn (update req :uri subs (dec (count prefix))))
+        (response/not-found {})))))
+
+(defn handler
+  "Creates a handler using the definitions in the specified namespace.
+  This handler can be used for serving requests"
+  {:arglists '([ns-symbol]
+               [fn-var & more-fn-vars]
+               [[prefix handler] & more-prefix-and-handlers])}
+  [ns-or-fn-or-pair & more-args]
+  (cond
+    (vector? ns-or-fn-or-pair) (composite-handler (cons ns-or-fn-or-pair more-args))
+    (instance? clojure.lang.Namespace ns-or-fn-or-pair) (handler-from (ns-routes ns-or-fn-or-pair))
+    :else (handler-from (routes-from (cons ns-or-fn-or-pair more-args)))))
+
+(s/fdef handler
+  :args ::specs/handler-fn-args
+  :ret fn?)

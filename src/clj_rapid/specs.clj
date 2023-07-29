@@ -30,3 +30,7 @@
       (throw (ex-info (format "value failed to conform to spec: %s"
                               (s/explain-str a-spec a-value)) {})))
     result))
+
+(s/def ::handler-fn-args (s/alt :ns-symbol #(instance? clojure.lang.Namespace %)
+                           :fn-vars (s/* var?)
+                           :nested-handelrs (s/* (s/cat :prefix string? :handler fn?))))

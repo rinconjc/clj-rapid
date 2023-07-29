@@ -11,6 +11,18 @@
 
 (s/def ::item (s/keys :req-un [::title]))
 
+(def as-int (s/conformer (fn [v]
+               (try
+                 (Integer/parseInt v)
+                 (catch Exception _
+                   ::s/invalid)))))
+
+(s/def ::limit as-int)
+
+(s/def ::offset as-int)
+
+(s/def ::item-query (s/keys :req-un [::limit ::offset]))
+
 (defn wrap-user [handler]
   (fn [req]
     (if-let [user-id (-> req :session :user-id)]
@@ -45,7 +57,9 @@
 
 (defn ^{:get "/find-items"} find-items
   "Find items using a query"
-  [^{:query ::item-query} query])
+  [^{:query* ::item-query} query]
+  (println "in: find-items" query)
+  {:query query :values []})
 
 (def routes-from  #'clj-rapid.core/routes-from)
 
@@ -68,7 +82,7 @@
 
 (deftest request-handling
   (testing "handling requests"
-    (let [req-handler (handler "/" this-ns)]
+    (let [req-handler (handler this-ns)]
       (is (like? {:status 200 :body #(str/starts-with? % "Hello at")}
                  (req-handler {:request-method :get :uri "/ping"})))
       (is (= "Hello:there" (:body (req-handler {:request-method :get :uri "/hello/there"}))))
@@ -86,3 +100,17 @@
                  (req-handler {:request-method :get
                                :uri "/items"
                                :query-params {:text "shopping" :limit "20" :offset "10"}}))))))
+
+(deftest handler-testing
+  (testing "handler"
+    (let [handler-fn (handler ["/system" (handler #'ping)]
+                              ["/api" (handler this-ns)]
+                              ["/" (handler #'find-items)])]
+      (is (fn? handler-fn))
+      (is (like? {:status 200}
+                 (handler-fn {:request-method :get :uri "/system/ping"})))
+      (is (like? {:status 200
+                  :body (fn [body]
+                          (util/alike? {:query {:limit 100}} (read-json body)))}
+                 (handler-fn {:request-method :get :uri "/find-items"
+                              :query-params {:limit "100" :offset "10"}}))))))

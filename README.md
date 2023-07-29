@@ -101,13 +101,21 @@ Creating a handler from all router functions in a namespace:
 
 ```clojure
 (def current-ns *ns*)
-(handler "/" current-ns)
+(handler current-ns)
 ```
 
 Creating a handler from a list of router functions
 
 ```clojure
-(handler "/api" [get-posts new-post])
+(handler [get-posts new-post])
+```
+
+Composing handlers:
+
+```clojure
+(handler  ["/" (handler fn1 fn2)]
+    ["/api" (handler api-ns)]
+    ["/static" (static-handler)])
 ```
 
 
