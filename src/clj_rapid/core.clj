@@ -6,11 +6,12 @@
    [clojure.tools.logging :as log]
    [muuntaja.middleware :as mm]
    [ring.middleware.params :as params]
+   [ring.middleware.cookies :refer [wrap-cookies]]
    [ring.util.response :as response]))
 
 (def http-methods #{:get :put :post :patch :delete :options :*})
 
-(def param-sources [:body :header :query :form :form* :query* :path :request :param :param*])
+(def param-sources [:body :header :query :form :form* :query* :path :request :param :param* :cookie])
 
 (def ANY-PATH :*)
 
@@ -68,28 +69,30 @@
 (defn- arg-parser [arg path-vars]
   (let [arg-meta (as-> (meta arg) arg-meta
                    (unless :name arg-meta (assoc arg-meta :name (name arg)))
-                   (update arg-meta :name keyword)
                    (unless :source arg-meta
                            (if-let [[source type] (first (select-keys arg-meta param-sources))]
                              (if (true? type)
                                (assoc arg-meta :source source)
                                (assoc arg-meta :source source :type type))
                              (assoc arg-meta
-                                    :source (if (some #(= (:name arg-meta) %) path-vars)
+                                    :source (if (some #(= (:name arg-meta) (name %)) path-vars)
                                               :path :query))))
                    (unless :type arg-meta (assoc arg-meta :type (:tag arg-meta))))
+        arg-name (:name arg-meta)
+        arg-key (keyword arg-name)
         convert-fn (or (some->> (:type arg-meta) (partial conform-to)) identity)
         value-fn (case (:source arg-meta)
                    :body #(or (:body-params %) (:body %))
-                   :query #(get-in % [:query-params (:name arg-meta)])
-                   :form #(get-in % [:form-params (:name arg-meta)])
-                   :param #(get-in % [:params (:name arg-meta)])
+                   :query #(get-in % [:query-params arg-name])
+                   :form #(get-in % [:form-params arg-name])
+                   :param #(get-in % [:params arg-name])
                    :params :params
-                   :path (comp (:name arg-meta) :path-params)
-                   :header #(get-in % [:headers (:name arg-meta)])
+                   :path (comp arg-key :path-params)
+                   :header #(get-in % [:headers arg-name])
+                   :cookie #(get-in % [:cookies arg-name])
                    :query* :query-params
                    :form* :form-params
-                   :request (:name arg-meta))
+                   :request arg-key)
         default-fn (if-let [default (:default arg-meta)]
                      (fn [v] (if (nil? v) default v))
                      identity)]
@@ -165,6 +168,7 @@
     (-> req-handler
         params/wrap-params
         wrap-response
+        wrap-cookies
         mm/wrap-format)))
 
 (defn- normalise-prefix [uri-prefix]

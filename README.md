@@ -7,7 +7,7 @@
 An simple routing library for Clojure, inspired by Python's Fast API and Rust Axum's route definitions.
 
 ```clj
-[clj-rapid "0.0.0"]
+[clj-rapid "0.2.0"]
 ```
 
 
@@ -22,6 +22,8 @@ A function using a implicit path derived from the fn name:
 (defn ^:get ping []
     "up & runnig")
 ```
+
+Define request handlers annotating your functions with HTTP methods : `^:get, ^:post, ^:put , ^:patch, ^:delete, ^:options`
 
 With explicit path:
 ```clojure
@@ -44,6 +46,10 @@ With parameter de-structuring:
     ;; (get-posts offset limit)
     )
 ```
+You can annotate your function arguments with any of the following keywords:
+`:body, :form, :form*, :query, :query*, :path, :param, :param*, :cookie, :request, :body`
+
+* Use wildcard keywords: `:param*, :query*, :form*` to capture the full set of parameters of the given type.
 
 With body payload:
 
@@ -57,12 +63,14 @@ With spec validation:
 
 ```clojure
 ;; ...
-(s/def ::post (s/keys :req-un [::title ::content]))
+(s/def ::article (s/keys :req-un [::title ::content]))
 
-(defn ^{:post "/posts"} new-post [^{:body ::post} post]
+(defn ^{:post "/articles"} new-article [^{:body ::article} post]
     ;;(create-post post)
     )
 ```
+If the parameter doesn't conform to the given specs, the handler returns a bad request (HTTP 400) response.
+
 
 ```clojure
 ;; ...
@@ -101,13 +109,14 @@ Creating a handler from all router functions in a namespace:
 
 ```clojure
 (def current-ns *ns*)
+
 (handler current-ns)
 ```
 
 Creating a handler from a list of router functions
 
 ```clojure
-(handler [get-posts new-post])
+(handler [#'get-posts #'new-post])
 ```
 
 Composing handlers:
